@@ -105,6 +105,31 @@ This tracing is local: it does not follow values through memory, across
 functions or through loops, so a format string that is constant only after such
 a path is still reported.
 
+### Deep analysis (`--deep`)
+
+For a cross-function answer, deep analysis confirms which calls actually receive
+attacker input. It is **on by default when Triton is installed** and otherwise
+skipped silently, so `explore` alone already uses it once the extra is present:
+
+```sh
+uv sync --extra deep      # installs Triton (heavy, opt-in)
+uv run compwnion explore <binary>          # auto: deep when Triton is available
+uv run compwnion explore --deep <binary>   # force it; warn if Triton is missing
+uv run compwnion explore --no-deep <binary># local analysis only (fast)
+```
+
+It emulates the binary from `main` with [Triton](https://triton-library.github.io/),
+taints the buffers that input functions (`read`, `scanf`, ...) fill, and follows
+the real control flow into called functions. A call whose key argument is proven
+to carry tainted data is marked `CONFIRMED` and its site annotated
+`input-derived` — for example a `printf` whose format reaches it from `scanf`
+through another function, or a `read` whose length is attacker-controlled.
+
+`--deep` only adds confidence; it never clears a finding. It follows a single
+concrete execution path with a bounded instruction budget, so a call it does not
+reach simply stays unconfirmed. It is x86-64 only; on other binaries `explore`
+reports that deep analysis was skipped and prints the local results.
+
 ## Running the tests
 
 ```sh

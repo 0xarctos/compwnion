@@ -14,7 +14,7 @@ from pathlib import Path
 
 import lief
 
-from compwnion.explore import RiskyCall, explore
+from compwnion.explore import CallSite, RiskyCall, explore
 from compwnion.impacts import Severity, impact_of, severity_of
 from compwnion.scan import ScanReport, UnsupportedBinaryError, scan
 
@@ -80,7 +80,8 @@ def format_findings(findings: list[RiskyCall], color: bool = False) -> str:
     plural = "" if len(findings) == 1 else "s"
     lines = [f"Found {len(findings)} risky function{plural}:"]
     for call in findings:
-        label = SEVERITY_LABELS[call.severity]
+        confirmed = any(site.note == "input-derived" for site in call.call_sites)
+        label = SEVERITY_LABELS[call.severity] + (" CONFIRMED" if confirmed else "")
         tag = paint(label, call.severity) if color else label
         sites = ", ".join(
             f"{site.address:#x}" + (f" ({site.note})" if site.note else "")
@@ -131,6 +132,37 @@ def run_scan(args: argparse.Namespace) -> int:
     return 0
 
 
+def confirm_findings(
+    binary: Path, findings: list[RiskyCall], quiet: bool = False
+) -> list[RiskyCall]:
+    import compwnion.deep as deep
+
+    try:
+        verdicts = deep.taint_report(binary)
+    except deep.DeepUnavailable as error:
+        if not quiet:
+            print(f"compwnion: {error}", file=sys.stderr)
+        return findings
+    except UnsupportedBinaryError as error:
+        if not quiet:
+            print(f"compwnion: deep analysis skipped: {error}", file=sys.stderr)
+        return findings
+
+    confirmed = {verdict.address for verdict in verdicts if verdict.tainted}
+    return [
+        RiskyCall(
+            call.function,
+            call.severity,
+            call.risk,
+            [
+                CallSite(site.address, "input-derived" if site.address in confirmed else site.note)
+                for site in call.call_sites
+            ],
+        )
+        for call in findings
+    ]
+
+
 def run_explore(args: argparse.Namespace) -> int:
     error_code = resolve_binary(args.binary)
     if error_code is not None:
@@ -141,6 +173,11 @@ def run_explore(args: argparse.Namespace) -> int:
     except UnsupportedBinaryError as error:
         print(f"compwnion: {error}", file=sys.stderr)
         return 1
+
+    # args.deep: True forces deep (and reports if unavailable), False disables it,
+    # None (the default) tries deep when triton is installed and stays quiet otherwise.
+    if args.deep is not False:
+        findings = confirm_findings(args.binary, findings, quiet=args.deep is None)
 
     if not findings:
         print("No risky library calls found.")
@@ -168,6 +205,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         "explore", help="list calls to risky functions in a binary"
     )
     explore_parser.add_argument("binary", type=Path)
+    explore_parser.add_argument(
+        "--deep",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="confirm which calls receive attacker input (needs the deep extra); "
+        "defaults to on when triton is installed, --no-deep to force it off",
+    )
     explore_parser.set_defaults(run=run_explore)
 
     args = parser.parse_args(argv)

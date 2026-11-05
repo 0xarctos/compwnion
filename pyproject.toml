@@ -11,6 +11,11 @@ dependencies = [
     "lief>=1.0.0",
 ]
 
+[project.optional-dependencies]
+# Deep taint analysis for `explore --deep`. Heavy (Triton pulls native wheels),
+# so it is opt-in: install with `uv sync --extra deep`.
+deep = ["triton-library>=1.0.0rc4"]
+
 [project.scripts]
 compwnion = "compwnion.cli:main"
 

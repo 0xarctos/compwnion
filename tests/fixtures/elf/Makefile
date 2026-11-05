@@ -17,7 +17,7 @@ BINARIES = hello-pie hello-no-pie hello-hardened hello-unhardened hello-partial-
 	hello-shstk-only hello-lib hello-puts-only hello-bad-symbol \
 	static-nostdlib static-nostdlib-32 static-pie-nostdlib static-no-gnustack \
 	static-no-gnustack-32 static-rwx-load \
-	vuln-pie vuln-no-pie vuln-fmt-const
+	vuln-pie vuln-no-pie vuln-fmt-const fmt-taint
 
 # Risky calls stay as plain PLT calls: no FORTIFY (no _chk variants), no stack
 # protector noise, and -O0 so the compiler elides none of them.
@@ -111,6 +111,9 @@ vuln-no-pie: vuln.c
 	$(CC) -O0 -s $(VULN) -fno-pie -no-pie -o $@ $<
 
 vuln-fmt-const: fmt.c
+	$(CC) -O0 -s $(VULN) -fPIE -pie -o $@ $<
+
+fmt-taint: fmt_taint.c
 	$(CC) -O0 -s $(VULN) -fPIE -pie -o $@ $<
 
 clean:

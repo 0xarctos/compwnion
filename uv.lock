@@ -38,6 +38,11 @@ dependencies = [
     { name = "lief" },
 ]
 
+[package.optional-dependencies]
+deep = [
+    { name = "triton-library" },
+]
+
 [package.dev-dependencies]
 dev = [
     { name = "pytest" },
@@ -47,7 +52,9 @@ dev = [
 requires-dist = [
     { name = "capstone", specifier = ">=5.0.9" },
     { name = "lief", specifier = ">=1.0.0" },
+    { name = "triton-library", marker = "extra == 'deep'", specifier = ">=1.0.0rc4" },
 ]
+provides-extras = ["deep"]
 
 [package.metadata.requires-dev]
 dev = [{ name = "pytest", specifier = ">=9.2.0" }]
@@ -149,4 +156,17 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/79/42/bb4641652e58dedeac2ec51abc1f8cae4fee4ec63899a0999016229a0f2a/pytest-9.2.0.tar.gz", hash = "sha256:97c4f3b1f3c7414aa36465e09b8220f1d03627993bd51b1282e193753c80557b", size = 1797555, upload-time = "2026-10-27T21:30:20.728Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/51/39/1f5d8c8877a0fa327db959c19341d4be61660de1ab6b7391f9eb805bcd67/pytest-9.2.0-py3-none-any.whl", hash = "sha256:07acdcf88ec174f907dc01af70bf52d49b014bbab03faeeade31c96b18c2e588", size = 411776, upload-time = "2026-10-27T21:30:19.131Z" },
+]
+
+[[package]]
+name = "triton-library"
+version = "1.0.0rc4"
+source = { registry = "https://pypi.org/simple" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ec/5c/f2d2ddc0456ffa0f102012de2ba1808d6912b5636f0d78a740289ed18d2f/triton_library-1.0.0rc4-cp312-cp312-manylinux_2_34_x86_64.whl", hash = "sha256:e0f828c8c1c037ccf8881d1b9e2a8565791e31d1594bd548b168bbfddcc653a5", size = 56119154, upload-time = "2025-02-14T18:30:44.912Z" },
+    { url = "https://files.pythonhosted.org/packages/ce/69/0e631bccd1d046c1923a9f641a5faf612b253b4ccbc967f090e4849b1cf1/triton_library-1.0.0rc4-cp312-cp312-win_amd64.whl", hash = "sha256:fad5f5727a560ce5cffa59e0a8bbae2bcfbe63e81caec20a36bc11a72599d3fc", size = 24229103, upload-time = "2025-02-14T17:49:14.881Z" },
+    { url = "https://files.pythonhosted.org/packages/a7/94/5276205bccbccd2740bdcb2ec7687cad5cbd243d305a01792530259a66aa/triton_library-1.0.0rc4-cp313-cp313-manylinux_2_34_x86_64.whl", hash = "sha256:f3599dd7ec00d2f782a26b32d4e08cde32014958a437ad96ad812f8b75cf1906", size = 56119161, upload-time = "2025-02-14T18:31:07.516Z" },
+    { url = "https://files.pythonhosted.org/packages/34/e9/1fce4e9d153ac97bc3d7d957b31475a2789f27e971b90216b6b32a8d3b45/triton_library-1.0.0rc4-cp313-cp313-win_amd64.whl", hash = "sha256:0ebca4aa755b9bf3080e99fc594797c7ddd9c72b751b11e2b2c0068ae199ee15", size = 24229300, upload-time = "2025-02-14T17:49:27.505Z" },
+    { url = "https://files.pythonhosted.org/packages/a4/ce/869d3e33e3d895980d4e85a6ddecaa0365f7fd1e631b5a0a7a6babac47e3/triton_library-1.0.0rc4-cp314-cp314-manylinux_2_34_x86_64.whl", hash = "sha256:59b007854dd231cec804c12c5345790710eff2adba76d7a0673b177551f507bf", size = 57558356, upload-time = "2026-02-23T18:21:27.625Z" },
+    { url = "https://files.pythonhosted.org/packages/11/7b/4120bd2e6faa06c2825f7e141ede3f6217bb2395e8763d6b3a75a36db316/triton_library-1.0.0rc4-cp314-cp314-win_amd64.whl", hash = "sha256:f2725de2292691ab88161f3260b1d4a4368088917b9d592aa085e54b1db5da05", size = 27501290, upload-time = "2026-02-23T18:30:31.293Z" },
 ]

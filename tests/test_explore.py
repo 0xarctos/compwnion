@@ -136,6 +136,48 @@ def test_cli_explore_reports_clean_binary(capsys: pytest.CaptureFixture[str]) ->
     assert "No risky library calls found." in capsys.readouterr().out
 
 
+def test_cli_explore_auto_is_silent_without_triton(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import compwnion.deep as deep
+
+    def unavailable(_path: Path) -> list[object]:
+        raise deep.DeepUnavailable("deep analysis needs triton")
+
+    monkeypatch.setattr(deep, "taint_report", unavailable)
+
+    exit_code = main(["explore", str(ELF_FIXTURES / "vuln-pie")])
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert "CONFIRMED" not in captured.out
+    assert "triton" not in captured.err.lower()
+
+
+def test_cli_explore_no_deep_stays_local(capsys: pytest.CaptureFixture[str]) -> None:
+    exit_code = main(["explore", "--no-deep", str(ELF_FIXTURES / "vuln-pie")])
+
+    assert exit_code == 0
+    assert "CONFIRMED" not in capsys.readouterr().out
+
+
+def test_cli_explore_deep_reports_missing_triton(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import compwnion.deep as deep
+
+    def unavailable(_path: Path) -> list[object]:
+        raise deep.DeepUnavailable("deep analysis needs triton")
+
+    monkeypatch.setattr(deep, "taint_report", unavailable)
+
+    exit_code = main(["explore", "--deep", str(ELF_FIXTURES / "vuln-pie")])
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert "triton" in captured.err.lower()
+
+
 def test_cli_explore_reports_missing_file(capsys: pytest.CaptureFixture[str]) -> None:
     exit_code = main(["explore", str(ELF_FIXTURES / "does-not-exist")])
 
