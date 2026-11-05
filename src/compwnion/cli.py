@@ -14,8 +14,11 @@ from pathlib import Path
 
 import lief
 
+from compwnion.explore import RiskyCall, explore
 from compwnion.impacts import Severity, impact_of, severity_of
 from compwnion.scan import ScanReport, UnsupportedBinaryError, scan
+
+SEVERITY_LABELS = {Severity.BAD: "CRITICAL", Severity.WARNING: "WARNING"}
 
 TABLE_BORDERS = len("| " + " | " + " | " + " |")
 MIN_IMPACT_WIDTH = 30
@@ -73,6 +76,26 @@ def format_report(report: ScanReport, color: bool = False) -> str:
     )
 
 
+def format_findings(findings: list[RiskyCall], color: bool = False) -> str:
+    plural = "" if len(findings) == 1 else "s"
+    lines = [f"Found {len(findings)} risky function{plural}:"]
+    for call in findings:
+        label = SEVERITY_LABELS[call.severity]
+        tag = paint(label, call.severity) if color else label
+        sites = ", ".join(
+            f"{site.address:#x}" + (f" ({site.note})" if site.note else "")
+            for site in call.call_sites
+        )
+        count = len(call.call_sites)
+        lines.append("")
+        lines.append(f"[{tag}] {call.function}  ({count} call site{'' if count == 1 else 's'})")
+        lines.append(f"  at {sites}")
+        lines.append(f"  {call.risk}")
+    lines.append("")
+    lines.append("Addresses are unbased; add the load base for a PIE at runtime.")
+    return "\n".join(lines)
+
+
 def resolve_binary(binary: Path) -> int | None:
     if binary.is_dir():
         print(f"compwnion: expected a file, got a directory: {binary}", file=sys.stderr)
@@ -108,6 +131,29 @@ def run_scan(args: argparse.Namespace) -> int:
     return 0
 
 
+def run_explore(args: argparse.Namespace) -> int:
+    error_code = resolve_binary(args.binary)
+    if error_code is not None:
+        return error_code
+
+    try:
+        findings = explore(args.binary)
+    except UnsupportedBinaryError as error:
+        print(f"compwnion: {error}", file=sys.stderr)
+        return 1
+
+    if not findings:
+        print("No risky library calls found.")
+        return 0
+
+    color = use_color()
+    if color:
+        enable_windows_ansi()
+
+    print(format_findings(findings, color))
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     lief.logging.disable()
 
@@ -117,6 +163,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     scan_parser = commands.add_parser("scan", help="summarize the security features of a binary")
     scan_parser.add_argument("binary", type=Path)
     scan_parser.set_defaults(run=run_scan)
+
+    explore_parser = commands.add_parser(
+        "explore", help="list calls to risky functions in a binary"
+    )
+    explore_parser.add_argument("binary", type=Path)
+    explore_parser.set_defaults(run=run_explore)
 
     args = parser.parse_args(argv)
     return args.run(args)

@@ -74,6 +74,37 @@ case and counts every writable segment.
 
 In VS Code, select `.venv` as the Python interpreter so that imports resolve.
 
+## Listing risky calls
+
+List calls to functions that are common sources of memory-safety bugs:
+
+```sh
+uv run compwnion explore <binary>
+```
+
+It disassembles the code, resolves each call through the PLT, and reports calls
+to a catalog of risky libc functions (`gets`, `strcpy`, `sprintf`, `scanf`,
+`system`, `printf`, `read`, ...), grouped by function with their call sites.
+
+This is a heuristic: a call being listed means the function is used, not that its
+arguments are actually attacker-controlled. `CRITICAL` marks calls that are
+unsafe by construction (unbounded copies, shell execution); `WARNING` marks calls
+that are a bug only under a condition (a user-controlled format or length). It
+covers x86 and x86-64, and resolves names through the PLT, so statically linked
+or non-x86 binaries report little or nothing.
+
+On x86-64, each flagged call is refined by tracing where its key argument comes
+from, within the function and following register copies:
+
+- A `printf`-family call whose format string is a constant is **not** reported:
+  a constant format cannot carry attacker-controlled specifiers.
+- A `read`, `recv` or `memcpy` call is annotated with its length: `n=0x100` for a
+  constant, or `n=computed` when the length comes from a register.
+
+This tracing is local: it does not follow values through memory, across
+functions or through loops, so a format string that is constant only after such
+a path is still reported.
+
 ## Running the tests
 
 ```sh
