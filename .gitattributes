@@ -1,0 +1,3 @@
+tests/fixtures/elf/hello-* binary
+tests/fixtures/elf/static-* binary
+tests/fixtures/elf/Makefile text eol=lf

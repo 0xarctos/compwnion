@@ -1,0 +1,8 @@
+# License header to copy at the top of every source file in the project.
+# (adapt the comment syntax to the language: # for Python, // for C/C++)
+
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 0xarctos
+#
+# Part of Compwnion - companion tools for pwn quests
+# Licensed under the Apache License, Version 2.0; see the LICENSE file.

@@ -1,0 +1,26 @@
+[project]
+name = "compwnion"
+version = "0.1.0"
+description = "Companion tools for pwn quests"
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+requires-python = ">=3.12"
+dependencies = [
+    "lief>=1.0.0",
+]
+
+[project.scripts]
+compwnion = "compwnion.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.2.0",
+]
