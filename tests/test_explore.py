@@ -166,6 +166,20 @@ def test_disassembler_matches_architecture() -> None:
     assert disassembler_for(binary32).mode & capstone.CS_MODE_32
 
 
+@pytest.mark.skipif(
+    not (ELF_FIXTURES / "vuln-no-pie-32").exists(),
+    reason="vuln-no-pie-32 fixture needs gcc-multilib; built by the Makefile on Linux/WSL",
+)
+def test_explore_resolves_absolute_plt_on_x86_32() -> None:
+    # A 32-bit non-PIE binary reaches the GOT through an absolute memory operand
+    # (jmp [0x804xxxx]), not the x86-64 RIP-relative form. explore must still
+    # resolve the PLT and flag the risky calls, printf among them.
+    found = findings_by_name("vuln-no-pie-32")
+
+    assert "printf" in found
+    assert "scanf" in found
+
+
 def test_explore_on_binary_without_plt_returns_nothing() -> None:
     # A -nostdlib binary has no PLT, so no library call can be resolved.
     assert explore(ELF_FIXTURES / "static-nostdlib-32") == []

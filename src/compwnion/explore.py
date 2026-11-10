@@ -168,6 +168,22 @@ def rip_target(instruction: capstone.CsInsn) -> int | None:
     return None
 
 
+# The address a PLT stub's indirect jump reads its GOT slot from. x86-64 PIE
+# stubs are RIP-relative (jmp [rip+disp]); x86 non-PIE stubs use an absolute
+# operand (jmp [disp]) with no base or index register. A register-relative stub
+# (e.g. a 32-bit PIE jmp [ebx+off]) needs a resolved GOT base, so return None.
+def plt_slot_target(instruction: capstone.CsInsn) -> int | None:
+    for operand in instruction.operands:
+        if operand.type != capstone.x86.X86_OP_MEM:
+            continue
+        mem = operand.mem
+        if mem.base == capstone.x86.X86_REG_RIP:
+            return instruction.address + instruction.size + mem.disp
+        if mem.base == capstone.x86.X86_REG_INVALID and mem.index == capstone.x86.X86_REG_INVALID:
+            return mem.disp
+    return None
+
+
 # Maps each PLT stub to the symbol it jumps to, so that a direct call to the
 # stub in .text can be named. Modern stubs open with endbr64; older ones do not.
 def plt_targets(binary: lief.ELF.Binary, disassembler: capstone.Cs) -> dict[int, str]:
@@ -184,7 +200,7 @@ def plt_targets(binary: lief.ELF.Binary, disassembler: capstone.Cs) -> dict[int,
             if instruction.mnemonic == "endbr64":
                 stub_start = instruction.address
             elif "jmp" in instruction.mnemonic:
-                slot = rip_target(instruction)
+                slot = plt_slot_target(instruction)
                 if slot in got:
                     # Without a leading endbr64 the stub is just the jmp itself.
                     start = stub_start if stub_start is not None else instruction.address

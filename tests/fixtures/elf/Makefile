@@ -17,7 +17,7 @@ BINARIES = hello-pie hello-no-pie hello-hardened hello-unhardened hello-partial-
 	hello-shstk-only hello-lib hello-puts-only hello-bad-symbol \
 	static-nostdlib static-nostdlib-32 static-pie-nostdlib static-no-gnustack \
 	static-no-gnustack-32 static-rwx-load \
-	vuln-pie vuln-no-pie vuln-fmt-const fmt-taint fmt-vararg
+	vuln-pie vuln-no-pie vuln-fmt-const fmt-taint fmt-vararg vuln-no-pie-32
 
 # Risky calls stay as plain PLT calls: no FORTIFY (no _chk variants), no stack
 # protector noise, and -O0 so the compiler elides none of them.
@@ -118,6 +118,12 @@ fmt-taint: fmt_taint.c
 
 fmt-vararg: fmt_vararg.c
 	$(CC) -O0 -s $(VULN) -fPIE -pie -o $@ $<
+
+# 32-bit, non-PIE: its PLT stubs reach the GOT through an absolute memory
+# operand (jmp [0x804xxxx]) rather than the x86-64 RIP-relative form, which
+# explore must still resolve. Needs gcc-multilib for -m32.
+vuln-no-pie-32: vuln.c
+	$(CC) -O0 -s -m32 $(VULN) -fno-pie -no-pie -o $@ $<
 
 clean:
 	rm -f $(BINARIES)
