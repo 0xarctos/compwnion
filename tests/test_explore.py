@@ -28,14 +28,16 @@ from compwnion.scan import UnsupportedBinaryError
 
 ELF_FIXTURES = Path(__file__).parent / "fixtures" / "elf"
 
-# Every risky call in vuln.c, with the severity explore should assign.
+# Every risky call in vuln.c, with the severity explore should assign. printf is
+# critical here because its format is the sole, non-constant argument -- a full
+# format-string primitive, not a merely conditional risk.
 EXPECTED = {
     "strcpy": Severity.BAD,
     "strcat": Severity.BAD,
     "sprintf": Severity.BAD,
     "scanf": Severity.BAD,
     "system": Severity.BAD,
-    "printf": Severity.WARNING,
+    "printf": Severity.BAD,
     "read": Severity.WARNING,
 }
 
@@ -82,6 +84,14 @@ def test_explore_flags_single_argument_format(fixture: str) -> None:
     printf = findings_by_name(fixture)["printf"]
 
     assert [site.note for site in printf.call_sites] == ["single-arg"]
+
+
+def test_explore_single_argument_format_is_critical() -> None:
+    # The sole-argument format string gives arbitrary read and %n write, so it
+    # is critical rather than a conditional warning.
+    printf = findings_by_name("vuln-pie")["printf"]
+
+    assert printf.severity == Severity.BAD
 
 
 def _calls_by_function(fixture: str):

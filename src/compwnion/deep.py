@@ -62,9 +62,15 @@ CONFIRM_ARGUMENT: dict[str, tuple[int, str]] = {
 # Functions that end the program: stop emulating when one is called.
 STOP_FUNCTIONS = {"exit", "_exit", "abort", "__stack_chk_fail", "__assert_fail"}
 
-STACK_BASE = 0x7FFFFFF00000
+# Stack top, per word size (a 32-bit esp cannot hold the 64-bit value).
+STACK_BASE = {64: 0x7FFFFFF00000, 32: 0xFFFFD000}
 RETURN_SENTINEL = 0x4B4B4B4B
 INSTRUCTION_BUDGET = 100_000
+# A separate, unmapped region where a synthetic argv/envp is laid out, so the
+# program's own command line counts as attacker input. Well clear of the code
+# segments and the stack for both word sizes.
+ARGS_BASE = 0x55000000
+ARGC = 2
 # Bytes of a flagged pointer's target to test for taint, and the cap on how much
 # of an input buffer to taint.
 POINTER_PROBE = 8
@@ -93,9 +99,16 @@ def _import_triton():
 
 
 class _Emulator:
-    def __init__(self, triton, binary: lief.ELF.Binary, disassembler):
+    def __init__(self, triton, binary: lief.ELF.Binary, disassembler, bits: int):
         self._t = triton
         self._md = disassembler
+        self._bits = bits
+        self._word = bits // 8
+        # Names of the stack pointer, instruction pointer and return register.
+        self._sp = "rsp" if bits == 64 else "esp"
+        self._ip = "rip" if bits == 64 else "eip"
+        self._ret = "rax" if bits == 64 else "eax"
+        self._stack_base = STACK_BASE[bits]
         self._stubs = plt_targets(binary, disassembler)
         self._executable = [
             (section.virtual_address, section.virtual_address + section.size)
@@ -106,7 +119,8 @@ class _Emulator:
         self._ctx = self._load()
 
     def _load(self):
-        ctx = self._t.TritonContext(self._t.ARCH.X86_64)
+        arch = self._t.ARCH.X86_64 if self._bits == 64 else self._t.ARCH.X86
+        ctx = self._t.TritonContext(arch)
         for segment in self._binary.segments:
             if segment.type == lief.ELF.Segment.TYPE.LOAD and segment.physical_size:
                 ctx.setConcreteMemoryAreaValue(int(segment.virtual_address), bytes(segment.content))
@@ -118,6 +132,12 @@ class _Emulator:
     def _set_reg(self, name: str, value: int) -> None:
         self._ctx.setConcreteRegisterValue(getattr(self._ctx.registers, name), value)
 
+    def _read_word(self, address: int) -> int:
+        return self._ctx.getConcreteMemoryValue(self._t.MemoryAccess(int(address), self._word))
+
+    def _write_word(self, address: int, value: int) -> None:
+        self._ctx.setConcreteMemoryValue(self._t.MemoryAccess(int(address), self._word), value)
+
     def _decode(self, pc: int):
         data = self._ctx.getConcreteMemoryAreaValue(int(pc), 16)
         return next(self._md.disasm(bytes(data), int(pc)), None)
@@ -128,19 +148,26 @@ class _Emulator:
     def _executable_pc(self, pc: int) -> bool:
         return any(low <= pc < high for low, high in self._executable)
 
-    # main's address is whatever _start loads into rdi before its first call.
+    # main's address: on x86-64 _start loads it into rdi before calling
+    # __libc_start_main; on x86-32 it is pushed, so it sits at the top of the
+    # stack at that call. The x86-32 _start first calls a get-PC thunk, which
+    # must be stepped through, so stop only at the external (PLT) call.
     def find_main(self) -> int | None:
-        self._set_reg("rsp", STACK_BASE)
-        self._set_reg("rip", int(self._binary.entrypoint))
+        self._set_reg(self._sp, self._stack_base)
+        self._set_reg(self._ip, int(self._binary.entrypoint))
         pc = int(self._binary.entrypoint)
-        for _ in range(40):
+        for _ in range(200):
             instruction = self._decode(pc)
             if instruction is None:
                 return None
             if instruction.mnemonic.endswith("call"):
-                return self._reg("rdi")
+                target = call_target(instruction)
+                if self._bits == 64:
+                    return self._reg("rdi")
+                if target in self._stubs:
+                    return self._read_word(self._reg("esp"))
             self._process(instruction)
-            pc = self._reg("rip")
+            pc = self._reg(self._ip)
         return None
 
     def _taint_memory(self, address: int, size: int) -> None:
@@ -148,12 +175,39 @@ class _Emulator:
         for offset in range(min(size, MAX_TAINT)):
             self._ctx.taintMemory(access(address + offset, 1))
 
+    # Lay out a synthetic argv/envp in a scratch region and taint the strings,
+    # so a format or command taken from the command line is confirmed. Returns
+    # (argv, envp) pointers. Called before the main frame is built.
+    def _install_arguments(self) -> tuple[int, int]:
+        word = self._word
+        argv, envp = ARGS_BASE, ARGS_BASE + 0x40
+        program, attacker, environment = ARGS_BASE + 0x100, ARGS_BASE + 0x200, ARGS_BASE + 0x300
+        self._write_word(argv + 0 * word, program)
+        self._write_word(argv + 1 * word, attacker)  # argv[1], attacker-controlled
+        self._write_word(argv + 2 * word, 0)
+        self._write_word(envp + 0 * word, environment)
+        self._write_word(envp + 1 * word, 0)
+        for string in (program, attacker, environment):
+            self._ctx.setConcreteMemoryAreaValue(string, b"A" * 64 + b"\x00")
+        # The program name is not an injection vector; the rest is attacker input.
+        self._taint_memory(attacker, 64)
+        self._taint_memory(environment, 64)
+        return argv, envp
+
+    def _argument_pointer(self, index: int) -> int:
+        if self._bits == 64:
+            return self._reg(ARGUMENT_REGISTERS[index])
+        # cdecl: at the intercepted call, esp points at the first argument.
+        return self._read_word(self._reg("esp") + index * self._word)
+
     def _argument_tainted(self, index: int, kind: str) -> bool:
-        register = getattr(self._ctx.registers, ARGUMENT_REGISTERS[index])
-        if kind == "reg":
-            return self._ctx.isRegisterTainted(register)
-        pointer = self._reg(ARGUMENT_REGISTERS[index])
         access = self._t.MemoryAccess
+        if kind == "reg":
+            if self._bits == 64:
+                return self._ctx.isRegisterTainted(getattr(self._ctx.registers, ARGUMENT_REGISTERS[index]))
+            slot = self._reg("esp") + index * self._word
+            return any(self._ctx.isMemoryTainted(access(slot + i, 1)) for i in range(self._word))
+        pointer = self._argument_pointer(index)
         return any(self._ctx.isMemoryTainted(access(pointer + i, 1)) for i in range(POINTER_PROBE))
 
     def _handle_external(self, name: str, address: int) -> list[TaintVerdict]:
@@ -164,19 +218,29 @@ class _Emulator:
 
         if name in INPUT_FUNCTIONS:
             buffer_arg, length_arg, default = INPUT_FUNCTIONS[name]
-            buffer = self._reg(ARGUMENT_REGISTERS[buffer_arg])
-            size = self._reg(ARGUMENT_REGISTERS[length_arg]) if length_arg is not None else default
+            buffer = self._argument_pointer(buffer_arg)
+            size = self._argument_pointer(length_arg) if length_arg is not None else default
             self._taint_memory(buffer, size)
 
         # Model the call's net effect: a fresh, untainted return value.
-        self._ctx.untaintRegister(self._ctx.registers.rax)
-        self._set_reg("rax", 0)
+        self._ctx.untaintRegister(getattr(self._ctx.registers, self._ret))
+        self._set_reg(self._ret, 0)
         return verdicts
 
     def run(self, main: int) -> list[TaintVerdict]:
-        # Fresh frame: a sentinel return address marks the end of main.
-        self._set_reg("rsp", STACK_BASE)
-        self._ctx.setConcreteMemoryValue(self._t.MemoryAccess(STACK_BASE, 8), RETURN_SENTINEL)
+        argv, envp = self._install_arguments()
+        # Fresh frame: a sentinel return address marks the end of main, with
+        # argc/argv/envp passed the way the ABI expects them.
+        self._set_reg(self._sp, self._stack_base)
+        self._write_word(self._stack_base, RETURN_SENTINEL)
+        if self._bits == 64:
+            self._set_reg("rdi", ARGC)
+            self._set_reg("rsi", argv)
+            self._set_reg("rdx", envp)
+        else:
+            self._write_word(self._stack_base + 1 * self._word, ARGC)
+            self._write_word(self._stack_base + 2 * self._word, argv)
+            self._write_word(self._stack_base + 3 * self._word, envp)
         verdicts: list[TaintVerdict] = []
 
         pc = main
@@ -198,7 +262,7 @@ class _Emulator:
                     continue
 
             self._process(instruction)
-            pc = self._reg("rip")
+            pc = self._reg(self._ip)
 
         return verdicts
 
@@ -209,10 +273,11 @@ def taint_report(path: Path) -> list[TaintVerdict]:
     binary = lief.parse(str(path))
     if not isinstance(binary, lief.ELF.Binary):
         raise UnsupportedBinaryError(f"Unsupported binary format: {path}")
-    if binary.header.machine_type != Arch.X86_64:
-        raise UnsupportedBinaryError("deep analysis supports x86-64 binaries only")
+    bits = {Arch.X86_64: 64, Arch.I386: 32}.get(binary.header.machine_type)
+    if bits is None:
+        raise UnsupportedBinaryError("deep analysis supports x86 and x86-64 binaries only")
 
-    emulator = _Emulator(triton, binary, disassembler_for(binary))
+    emulator = _Emulator(triton, binary, disassembler_for(binary), bits)
     main = emulator.find_main()
     if main is None:
         return []

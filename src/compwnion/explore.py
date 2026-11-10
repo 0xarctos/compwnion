@@ -558,11 +558,24 @@ def explore(path: Path) -> list[RiskyCall]:
 
         sites.setdefault(function, []).append(CallSite(instruction.address, note))
 
-    findings = [
-        RiskyCall(function, *CATALOG[function], sorted(addresses, key=lambda site: site.address))
-        for function, addresses in sites.items()
-    ]
-    # Most severe first, then most call sites, then name, for a stable order.
+    findings = []
+    for function, addresses in sites.items():
+        severity, risk = CATALOG[function]
+        # A non-constant format passed as the sole argument is a full
+        # format-string primitive -- arbitrary read via %s/%p and an arbitrary
+        # write via %n -- not a merely conditional risk, so raise it to
+        # critical rather than leaving it a warning.
+        if function in FORMAT_ARGUMENT and any(site.note == "single-arg" for site in addresses):
+            severity = Severity.BAD
+        findings.append(
+            RiskyCall(function, severity, risk, sorted(addresses, key=lambda site: site.address))
+        )
+    return order_findings(findings)
+
+
+# Most severe first, then most call sites, then name, for a stable order.
+def order_findings(findings: list[RiskyCall]) -> list[RiskyCall]:
     order = [Severity.BAD, Severity.WARNING]
-    findings.sort(key=lambda call: (order.index(call.severity), -len(call.call_sites), call.function))
-    return findings
+    return sorted(
+        findings, key=lambda call: (order.index(call.severity), -len(call.call_sites), call.function)
+    )

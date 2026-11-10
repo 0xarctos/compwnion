@@ -46,9 +46,41 @@ def test_deep_clears_constant_format_string() -> None:
     assert tainted("vuln-fmt-const").get("printf", False) is False
 
 
-def test_deep_rejects_non_amd64() -> None:
+def test_deep_handles_x86_32_without_libc_main() -> None:
+    # x86-32 is supported now. A -nostdlib binary has no libc main to find, so
+    # the analysis yields nothing rather than raising.
+    assert taint_report(ELF_FIXTURES / "static-nostdlib-32") == []
+
+
+def test_deep_rejects_non_elf(tmp_path: Path) -> None:
+    text = tmp_path / "note.txt"
+    text.write_text("not an ELF")
     with pytest.raises(UnsupportedBinaryError):
-        taint_report(ELF_FIXTURES / "static-nostdlib-32")
+        taint_report(text)
+
+
+@pytest.mark.skipif(
+    not (ELF_FIXTURES / "vuln-no-pie-32").exists(),
+    reason="x86-32 fixture needs gcc-multilib; built by the Makefile on Linux/WSL",
+)
+def test_deep_confirms_format_string_on_x86_32() -> None:
+    # vuln.c reads input with scanf, then printf(input): the cdecl emulation
+    # must follow the taint across handle() and confirm the format string.
+    assert tainted("vuln-no-pie-32")["printf"] is True
+
+
+def test_cli_explore_marks_confirmed_single_arg_format(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # fmt_taint.c is read(buffer); printf(buffer): the printf is both the sole
+    # argument and taint-confirmed, so its own line must carry CONFIRMED (the
+    # combined "input-derived, single-arg" note must not hide the label).
+    exit_code = main(["explore", "--deep", str(ELF_FIXTURES / "fmt-taint")])
+
+    output = capsys.readouterr().out
+    assert exit_code == 0
+    printf_line = next(line for line in output.splitlines() if "printf" in line)
+    assert "CONFIRMED" in printf_line
 
 
 def test_cli_explore_deep_marks_confirmed(capsys: pytest.CaptureFixture[str]) -> None:

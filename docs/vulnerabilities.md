@@ -35,12 +35,14 @@ libc functions (the *sinks* below). So:
     format is a link-time constant, reports whether the format is the call's
     *only* argument, and annotates a `read`/`memcpy` length.
   - **Deep taint** (`explore.py --deep`, `deep.py`): emulates from `main` with
-    Triton along one concrete path, taints input buffers, and marks a call
+    Triton along one concrete path (x86 and x86-64), taints the attacker
+    sources — input buffers and the program's `argv`/`envp` — and marks a call
     `CONFIRMED` when attacker data provably reaches its key argument.
 
-Confidence, highest to lowest: **`CONFIRMED` (taint-proven)** > **unbounded sink
-by construction (`CRITICAL`)** > **conditional sink with a dangerous local
-signature (`WARNING` + note)** > **conditional sink, unrefined**.
+Confidence, highest to lowest: **`CONFIRMED` (taint-proven)** > **unsafe by
+construction, or a format string whose control is established (`CRITICAL`)** >
+**conditional sink with a weaker local signal (`WARNING` + note)** >
+**conditional sink, unrefined**.
 
 ---
 
@@ -80,8 +82,12 @@ the function's *only* argument — `printf(user)` instead of
 2. Format is non-constant but other arguments are present (could still be a bug
    if the format itself is tainted).
 3. Format is a link-time constant → **cannot** carry attacker specifiers.
-**`explore`:** `WARNING`. A constant format (case 3) is **masked** (not
-reported). Deep taint marks the call `CONFIRMED` when the format is tainted.
+**`explore`:** a format whose control is established is `CRITICAL`, not merely
+conditional, because it yields arbitrary read (`%s`/`%p`) and an arbitrary write
+(`%n`): case 1 (sole non-constant argument) is raised to `CRITICAL` locally, and
+any format deep taint confirms is raised to `CRITICAL` too. A constant format
+(case 3) is **masked** (not reported); case 2 without confirmation stays
+`WARNING`. Deep taint marks a confirmed call `CONFIRMED`.
 **Limit:** the local pass does not read the format's *bytes*, so it cannot tell
 `"%s"` from an attacker string that merely looks constant through a path it does
 not follow.
@@ -136,8 +142,8 @@ these; a clean report does not rule them out.
 ## Practical limits of the current engine
 
 - **PLT-resolved calls only:** statically linked or non-x86 binaries resolve few
-  or no names, so little is reported. Local provenance covers x86 and x86-64;
-  deep taint (`--deep`) is x86-64 only.
+  or no names, so little is reported. Local provenance and deep taint both cover
+  x86 and x86-64.
 - **Local provenance** does not follow values through memory, across functions,
   or around loops — hence deep taint for the cross-function answer. On an
   x86-32 PIE whose PIC base it cannot resolve, a constant format is reported

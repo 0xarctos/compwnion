@@ -88,10 +88,12 @@ to a catalog of risky libc functions (`gets`, `strcpy`, `sprintf`, `scanf`,
 
 This is a heuristic: a call being listed means the function is used, not that its
 arguments are actually attacker-controlled. `CRITICAL` marks calls that are
-unsafe by construction (unbounded copies, shell execution); `WARNING` marks calls
-that are a bug only under a condition (a user-controlled format or length). It
-covers x86 and x86-64, and resolves names through the PLT, so statically linked
-or non-x86 binaries report little or nothing.
+unsafe by construction (unbounded copies, shell execution) and format strings
+whose format is attacker-controllable (a full read/`%n`-write primitive);
+`WARNING` marks calls that are a bug only under a condition that is not
+established, such as a `read`/`memcpy` with a user-controlled length. It covers
+x86 and x86-64, and resolves names through the PLT, so statically linked or
+non-x86 binaries report little or nothing.
 
 On x86 and x86-64, each flagged call is refined by tracing where its key
 argument comes from within the function. This follows the x86-64 argument
@@ -101,8 +103,8 @@ constant strings loaded relative to it are recognized:
 - A `printf`-family call whose format string is a constant is **not** reported:
   a constant format cannot carry attacker-controlled specifiers.
 - A `printf`-family call whose non-constant format is the call's **only**
-  argument is annotated `single-arg`: `printf(user)` rather than
-  `printf("%s", user)`, the textbook format-string signature.
+  argument is raised to `CRITICAL` and annotated `single-arg`: `printf(user)`
+  rather than `printf("%s", user)`, the textbook format-string primitive.
 - A `read`, `recv` or `memcpy` call is annotated with its length: `n=0x100` for a
   constant, or `n=computed` when the length comes from a register.
 
@@ -128,15 +130,18 @@ uv run compwnion explore --no-deep <binary># local analysis only (fast)
 ```
 
 It emulates the binary from `main` with [Triton](https://triton-library.github.io/),
-taints the buffers that input functions (`read`, `scanf`, ...) fill, and follows
-the real control flow into called functions. A call whose key argument is proven
-to carry tainted data is marked `CONFIRMED` and its site annotated
+taints the attacker-controlled sources — the buffers that input functions
+(`read`, `scanf`, `fgets`, ...) fill, and the program's own `argv`/`envp` — and
+follows the real control flow into called functions. A call whose key argument
+is proven to carry tainted data is marked `CONFIRMED` and its site annotated
 `input-derived` — for example a `printf` whose format reaches it from `scanf`
-through another function, or a `read` whose length is attacker-controlled.
+through another function, a `printf(argv[1])` format string, or a `read` whose
+length is attacker-controlled.
 
 `--deep` only adds confidence; it never clears a finding. It follows a single
 concrete execution path with a bounded instruction budget, so a call it does not
-reach simply stays unconfirmed. It is x86-64 only; on other binaries `explore`
+reach simply stays unconfirmed. It covers x86 and x86-64 (the x86-64 argument
+registers and the x86-32 cdecl stack alike); on other architectures `explore`
 reports that deep analysis was skipped and prints the local results.
 
 ## Running the tests

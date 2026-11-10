@@ -14,11 +14,15 @@ from pathlib import Path
 
 import lief
 
-from compwnion.explore import CallSite, RiskyCall, explore
+from compwnion.explore import FORMAT_ARGUMENT, CallSite, RiskyCall, explore, order_findings
 from compwnion.impacts import Severity, impact_of, severity_of
 from compwnion.scan import ScanReport, UnsupportedBinaryError, scan
 
 SEVERITY_LABELS = {Severity.BAD: "CRITICAL", Severity.WARNING: "WARNING"}
+
+# Note prefix a call site carries once deep taint proves it receives attacker
+# input. It may be followed by a local annotation, e.g. "input-derived, single-arg".
+INPUT_DERIVED = "input-derived"
 
 TABLE_BORDERS = len("| " + " | " + " | " + " |")
 MIN_IMPACT_WIDTH = 30
@@ -80,7 +84,10 @@ def format_findings(findings: list[RiskyCall], color: bool = False) -> str:
     plural = "" if len(findings) == 1 else "s"
     lines = [f"Found {len(findings)} risky function{plural}:"]
     for call in findings:
-        confirmed = any(site.note == "input-derived" for site in call.call_sites)
+        confirmed = any(
+            site.note is not None and site.note.startswith(INPUT_DERIVED)
+            for site in call.call_sites
+        )
         label = SEVERITY_LABELS[call.severity] + (" CONFIRMED" if confirmed else "")
         tag = paint(label, call.severity) if color else label
         sites = ", ".join(
@@ -137,7 +144,7 @@ def _confirm_site(site: CallSite, confirmed: set[int]) -> CallSite:
     # signature is worth keeping alongside it.
     if site.address not in confirmed:
         return site
-    note = "input-derived" if not site.note else f"input-derived, {site.note}"
+    note = INPUT_DERIVED if not site.note else f"{INPUT_DERIVED}, {site.note}"
     return CallSite(site.address, note)
 
 
@@ -158,15 +165,18 @@ def confirm_findings(
         return findings
 
     confirmed = {verdict.address for verdict in verdicts if verdict.tainted}
-    return [
-        RiskyCall(
-            call.function,
-            call.severity,
-            call.risk,
-            [_confirm_site(site, confirmed) for site in call.call_sites],
-        )
-        for call in findings
-    ]
+    refined = []
+    for call in findings:
+        sites = [_confirm_site(site, confirmed) for site in call.call_sites]
+        severity = call.severity
+        # A format string proven to carry attacker input is a full format-string
+        # primitive, so raise it to critical as the local single-arg case does.
+        if call.function in FORMAT_ARGUMENT and any(
+            site.note is not None and site.note.startswith(INPUT_DERIVED) for site in sites
+        ):
+            severity = Severity.BAD
+        refined.append(RiskyCall(call.function, severity, call.risk, sites))
+    return order_findings(refined)
 
 
 def run_explore(args: argparse.Namespace) -> int:
