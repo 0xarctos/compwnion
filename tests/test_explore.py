@@ -10,11 +10,16 @@ import capstone
 import lief
 import pytest
 
+import lief as _lief
+
 from compwnion.cli import main
 from compwnion.explore import (
+    call_target,
     canonical_name,
     disassembler_for,
     explore,
+    format_is_sole_argument,
+    plt_targets,
 )
 from compwnion.impacts import Severity
 from compwnion.scan import UnsupportedBinaryError
@@ -64,6 +69,61 @@ def test_explore_keeps_attacker_controlled_format_string() -> None:
     printf = findings_by_name("vuln-pie")["printf"]
 
     assert len(printf.call_sites) == 1
+
+
+@pytest.mark.parametrize("fixture", ["vuln-pie", "vuln-no-pie"])
+def test_explore_flags_single_argument_format(fixture: str) -> None:
+    # vuln.c calls printf(input): the format is the only argument, the textbook
+    # format-string signature. Note that a naive check would be fooled by the
+    # rsi left over from the preceding sprintf; the detection must stop at the
+    # call boundary.
+    printf = findings_by_name(fixture)["printf"]
+
+    assert [site.note for site in printf.call_sites] == ["single-arg"]
+
+
+def _calls_by_function(fixture: str):
+    """Map each resolved libc function to the index of its call instruction."""
+    binary = _lief.parse(str(ELF_FIXTURES / fixture))
+    assert isinstance(binary, _lief.ELF.Binary)
+    disassembler = disassembler_for(binary)
+    names = plt_targets(binary, disassembler)
+    text = binary.get_section(".text")
+    instructions = list(disassembler.disasm(bytes(text.content), text.virtual_address))
+    found: dict[str, int] = {}
+    for index, instruction in enumerate(instructions):
+        if instruction.mnemonic.endswith("call"):
+            target = call_target(instruction)
+            if target in names:
+                found[canonical_name(names[target])] = index
+    return found, instructions
+
+
+def test_format_is_sole_argument_detects_the_only_argument() -> None:
+    # printf(input): format in rdi (arg 0), no variadic register set up.
+    calls, instructions = _calls_by_function("vuln-pie")
+
+    assert format_is_sole_argument(instructions, calls["printf"], 0) is True
+
+
+def test_format_is_sole_argument_sees_further_arguments() -> None:
+    # sprintf(global, "value=%s", input): format in rsi (arg 1), with the first
+    # variadic argument in rdx. The call is not single-argument.
+    calls, instructions = _calls_by_function("vuln-pie")
+
+    assert format_is_sole_argument(instructions, calls["sprintf"], 1) is False
+
+
+@pytest.mark.skipif(
+    not (ELF_FIXTURES / "fmt-vararg").exists(),
+    reason="fmt-vararg fixture is built by the Makefile on Linux/WSL",
+)
+def test_explore_does_not_tag_variadic_format_as_single_arg() -> None:
+    # fmt_vararg.c calls printf(buffer, 1): non-constant format, so it is still
+    # flagged, but with a variadic argument it is not the single-arg signature.
+    printf = findings_by_name("fmt-vararg")["printf"]
+
+    assert all(site.note != "single-arg" for site in printf.call_sites)
 
 
 def test_explore_annotates_read_length() -> None:

@@ -132,6 +132,15 @@ def run_scan(args: argparse.Namespace) -> int:
     return 0
 
 
+def _confirm_site(site: CallSite, confirmed: set[int]) -> CallSite:
+    # Taint proof overrides the local note, but a "single-arg" format-string
+    # signature is worth keeping alongside it.
+    if site.address not in confirmed:
+        return site
+    note = "input-derived" if not site.note else f"input-derived, {site.note}"
+    return CallSite(site.address, note)
+
+
 def confirm_findings(
     binary: Path, findings: list[RiskyCall], quiet: bool = False
 ) -> list[RiskyCall]:
@@ -154,10 +163,7 @@ def confirm_findings(
             call.function,
             call.severity,
             call.risk,
-            [
-                CallSite(site.address, "input-derived" if site.address in confirmed else site.note)
-                for site in call.call_sites
-            ],
+            [_confirm_site(site, confirmed) for site in call.call_sites],
         )
         for call in findings
     ]

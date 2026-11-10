@@ -98,8 +98,15 @@ from, within the function and following register copies:
 
 - A `printf`-family call whose format string is a constant is **not** reported:
   a constant format cannot carry attacker-controlled specifiers.
+- A `printf`-family call whose non-constant format is the call's **only**
+  argument is annotated `single-arg`: `printf(user)` rather than
+  `printf("%s", user)`, the textbook format-string signature.
 - A `read`, `recv` or `memcpy` call is annotated with its length: `n=0x100` for a
   constant, or `n=computed` when the length comes from a register.
+
+The bug classes `explore` targets, their binary signatures, and the classes it
+deliberately does **not** claim to catch are cataloged in
+[docs/vulnerabilities.md](docs/vulnerabilities.md).
 
 This tracing is local: it does not follow values through memory, across
 functions or through loops, so a format string that is constant only after such

@@ -277,6 +277,45 @@ def argument_provenance(
     return trace_register(instructions, index, ARG_REGISTERS[argument], ranges)
 
 
+# Index just before `index` where this call's argument setup can begin. The
+# argument registers are caller-saved, so only writes since the most recent
+# preceding call belong to this call. Bounding the search there (and by the
+# provenance window) stops a value left in a register by an earlier call's
+# setup from being mistaken for an argument to this one.
+def setup_region_start(instructions: list[capstone.CsInsn], index: int) -> int:
+    low = max(0, index - PROVENANCE_WINDOW)
+    for position in range(index - 1, low - 1, -1):
+        if instructions[position].mnemonic.endswith("call"):
+            return position + 1
+    return low
+
+
+def register_written_between(
+    instructions: list[capstone.CsInsn], start: int, index: int, register: int
+) -> bool:
+    want = canonical_register(register)
+    for position in range(start, index):
+        _, written = instructions[position].regs_access()
+        if any(canonical_register(reg) == want for reg in written):
+            return True
+    return False
+
+
+# True when the format is the call's only argument: printf(user) rather than
+# printf("%s", user). The first variadic argument always lands in the register
+# right after the format, so if that register is never set up for this call
+# there are no variadic arguments. A non-constant format passed alone is the
+# textbook format-string signature.
+def format_is_sole_argument(
+    instructions: list[capstone.CsInsn], index: int, format_argument: int
+) -> bool:
+    first_variadic = format_argument + 1
+    if first_variadic >= len(ARG_REGISTERS):
+        return True
+    start = setup_region_start(instructions, index)
+    return not register_written_between(instructions, start, index, ARG_REGISTERS[first_variadic])
+
+
 def explore(path: Path) -> list[RiskyCall]:
     binary = lief.parse(str(path))
     if not isinstance(binary, lief.ELF.Binary):
@@ -308,10 +347,15 @@ def explore(path: Path) -> list[RiskyCall]:
 
         note: str | None = None
         if refine and function in FORMAT_ARGUMENT:
-            fmt = argument_provenance(instructions, index, FORMAT_ARGUMENT[function], ranges)
+            format_argument = FORMAT_ARGUMENT[function]
+            fmt = argument_provenance(instructions, index, format_argument, ranges)
             # A constant format cannot carry an attacker's specifiers: not a bug.
             if fmt.kind == "readonly":
                 continue
+            # A non-constant format passed as the only argument is the textbook
+            # format-string bug; flag that stronger signal.
+            if format_is_sole_argument(instructions, index, format_argument):
+                note = "single-arg"
         elif refine and function in LENGTH_ARGUMENT:
             length = argument_provenance(instructions, index, LENGTH_ARGUMENT[function], ranges)
             note = f"n={length.value:#x}" if length.kind == "immediate" else "n=computed"
