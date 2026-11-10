@@ -161,10 +161,22 @@ def got_symbols(binary: lief.ELF.Binary) -> dict[int, str]:
     }
 
 
-def rip_target(instruction: capstone.CsInsn) -> int | None:
-    for operand in instruction.operands:
-        if operand.type == capstone.x86.X86_OP_MEM and operand.mem.base == capstone.x86.X86_REG_RIP:
-            return instruction.address + instruction.size + operand.mem.disp
+# The constant address a `lea` computes, for the two position-independent forms
+# that load a pointer to a read-only string: x86-64 RIP-relative (lea [rip+disp])
+# and x86-32 PIC (lea [ebx+disp], with ebx holding a resolved GOT base from
+# `pic`). Returns None for a genuinely dynamic address.
+def lea_target(instruction: capstone.CsInsn, pic: dict[int, int]) -> int | None:
+    mem = next(
+        (op.mem for op in instruction.operands if op.type == capstone.x86.X86_OP_MEM), None
+    )
+    if mem is None:
+        return None
+    if mem.base == capstone.x86.X86_REG_RIP:
+        return instruction.address + instruction.size + mem.disp
+    if mem.index == capstone.x86.X86_REG_INVALID:
+        base = pic.get(canonical_register(mem.base))
+        if base is not None:
+            return base + mem.disp
     return None
 
 
@@ -217,6 +229,53 @@ def call_target(instruction: capstone.CsInsn) -> int | None:
     return None
 
 
+# True when `target` is a get-PC thunk that loads the return address into `reg`
+# (mov reg, [esp]; ret), the body gcc calls to establish the PIC base on x86-32.
+def _is_pc_thunk(
+    instructions: list[capstone.CsInsn], by_address: dict[int, int], target: int, reg: int
+) -> bool:
+    index = by_address.get(target)
+    if index is None or index + 1 >= len(instructions):
+        return False
+    load, ret = instructions[index], instructions[index + 1]
+    if load.mnemonic != "mov" or len(load.operands) != 2 or ret.mnemonic != "ret":
+        return False
+    dest, source = load.operands
+    return (
+        dest.type == capstone.x86.X86_OP_REG
+        and canonical_register(dest.reg) == canonical_register(reg)
+        and source.type == capstone.x86.X86_OP_MEM
+        and source.mem.base == capstone.x86.X86_REG_ESP
+        and source.mem.index == capstone.x86.X86_REG_INVALID
+        and source.mem.disp == 0
+    )
+
+
+# Maps each register gcc pins the PIC base into (usually ebx) to that base, by
+# recognizing `call <get-PC thunk>; add reg, imm`. The base is the GOT address,
+# so a later `lea reg2, [reg - disp]` resolves to a concrete read-only pointer.
+def pic_bases(instructions: list[capstone.CsInsn]) -> dict[int, int]:
+    by_address = {instruction.address: index for index, instruction in enumerate(instructions)}
+    bases: dict[int, int] = {}
+    for index in range(1, len(instructions)):
+        instruction, previous = instructions[index], instructions[index - 1]
+        operands = instruction.operands
+        if (
+            instruction.mnemonic != "add"
+            or not previous.mnemonic.endswith("call")
+            or len(operands) != 2
+            or operands[0].type != capstone.x86.X86_OP_REG
+            or operands[1].type != capstone.x86.X86_OP_IMM
+        ):
+            continue
+        target = call_target(previous)
+        if target is None or not _is_pc_thunk(instructions, by_address, target, operands[0].reg):
+            continue
+        base = previous.address + previous.size + operands[1].imm
+        bases.setdefault(canonical_register(operands[0].reg), base)
+    return bases
+
+
 def readonly_ranges(binary: lief.ELF.Binary) -> list[tuple[int, int]]:
     alloc = lief.ELF.Section.FLAGS.ALLOC
     write = lief.ELF.Section.FLAGS.WRITE
@@ -250,12 +309,13 @@ def last_writer_index(instructions: list[capstone.CsInsn], index: int, register:
 
 # Follows a register back to whatever set it, through register-to-register moves
 # (a little copy propagation), which -O0 code inserts, e.g. lea rax, [rip+fmt];
-# mov rdi, rax. depth bounds the chase.
+# mov rdi, rax. depth bounds the chase. pic resolves x86-32 PIC pointers.
 def trace_register(
     instructions: list[capstone.CsInsn],
     index: int,
     register: int,
     ranges: list[tuple[int, int]],
+    pic: dict[int, int],
     depth: int = 4,
 ) -> Provenance:
     writer = last_writer_index(instructions, index, register)
@@ -264,7 +324,7 @@ def trace_register(
 
     instruction = instructions[writer]
     if instruction.mnemonic == "lea":
-        target = rip_target(instruction)
+        target = lea_target(instruction, pic)
         if target is not None and in_readonly(target, ranges):
             return Provenance("readonly", target)
         return Provenance("dynamic")
@@ -275,7 +335,7 @@ def trace_register(
             kind = "readonly" if in_readonly(source.imm, ranges) else "immediate"
             return Provenance(kind, source.imm)
         if source.type == capstone.x86.X86_OP_REG and depth > 0:
-            return trace_register(instructions, writer, source.reg, ranges, depth - 1)
+            return trace_register(instructions, writer, source.reg, ranges, pic, depth - 1)
         return Provenance("dynamic")
 
     # xor reg, reg zeroes the register.
@@ -287,10 +347,117 @@ def trace_register(
     return Provenance("dynamic")
 
 
-def argument_provenance(
-    instructions: list[capstone.CsInsn], index: int, argument: int, ranges: list[tuple[int, int]]
+# How far back to scan for a cdecl call's stack argument setup. Wider than the
+# register window: pushes and stack-slot moves can span more instructions.
+STACK_ARGUMENT_WINDOW = 48
+
+
+# Maps each outgoing cdecl stack argument (0, 1, 2, ...) to the index of the
+# instruction that last set it, for an x86-32 call. It tracks esp relative to
+# the call across pushes and explicit stack moves, covering both the push style
+# (push arg; call) and the accumulated style (sub esp; mov [esp+k], arg; call).
+# Returns (args, reliable); reliable is False when esp moves in a way the model
+# does not understand, so callers do not trust a half-built picture.
+def outgoing_stack_args(
+    instructions: list[capstone.CsInsn], index: int
+) -> tuple[dict[int, int], bool]:
+    esp = canonical_register(x86.X86_REG_ESP)
+    start = setup_region_start(instructions, index, STACK_ARGUMENT_WINDOW)
+    offset = 0
+    writes: list[tuple[int, int]] = []
+    for position in range(start, index):
+        instruction = instructions[position]
+        mnemonic, operands = instruction.mnemonic, instruction.operands
+        if mnemonic == "push":
+            offset -= 4
+            writes.append((offset, position))
+            continue
+        if mnemonic == "pop":
+            offset += 4
+            continue
+        if (
+            mnemonic in ("sub", "add")
+            and operands
+            and operands[0].type == x86.X86_OP_REG
+            and canonical_register(operands[0].reg) == esp
+            and operands[1].type == x86.X86_OP_IMM
+        ):
+            offset += -operands[1].imm if mnemonic == "sub" else operands[1].imm
+            continue
+        if mnemonic == "mov" and len(operands) == 2 and operands[0].type == x86.X86_OP_MEM:
+            memory = operands[0].mem
+            if canonical_register(memory.base) == esp and memory.index == x86.X86_REG_INVALID:
+                writes.append((offset + memory.disp, position))
+                continue
+        # Anything else that moves esp (alignment, a computed adjustment) desyncs
+        # the model: report unreliable rather than mislabel the arguments.
+        _, written = instruction.regs_access()
+        if any(canonical_register(register) == esp for register in written):
+            return {}, False
+
+    args: dict[int, int] = {}
+    for slot_offset, position in writes:
+        slot = slot_offset - offset
+        if slot >= 0 and slot % 4 == 0:
+            args[slot // 4] = position
+    return args, True
+
+
+# The operand a push or a stack-slot mov takes its value from.
+def _argument_source(instruction: capstone.CsInsn):
+    if instruction.mnemonic == "push" and instruction.operands:
+        return instruction.operands[0]
+    if instruction.mnemonic == "mov" and len(instruction.operands) == 2:
+        return instruction.operands[1]
+    return None
+
+
+def _operand_provenance(
+    instructions: list[capstone.CsInsn],
+    writer: int,
+    operand,
+    ranges: list[tuple[int, int]],
+    pic: dict[int, int],
 ) -> Provenance:
-    return trace_register(instructions, index, ARG_REGISTERS[argument], ranges)
+    if operand.type == capstone.x86.X86_OP_IMM:
+        kind = "readonly" if in_readonly(operand.imm, ranges) else "immediate"
+        return Provenance(kind, operand.imm)
+    if operand.type == capstone.x86.X86_OP_REG:
+        return trace_register(instructions, writer, operand.reg, ranges, pic)
+    return Provenance("dynamic")
+
+
+def stack_argument_provenance(
+    instructions: list[capstone.CsInsn],
+    index: int,
+    argument: int,
+    ranges: list[tuple[int, int]],
+    pic: dict[int, int],
+) -> Provenance:
+    args, reliable = outgoing_stack_args(instructions, index)
+    writer = args.get(argument) if reliable else None
+    if writer is None:
+        return Provenance("dynamic")
+    source = _argument_source(instructions[writer])
+    if source is None:
+        return Provenance("dynamic")
+    return _operand_provenance(instructions, writer, source, ranges, pic)
+
+
+# Where a call's `argument` (0-based) comes from, for either calling convention:
+# the x86-64 argument registers, or the x86-32 cdecl stack.
+def argument_provenance(
+    instructions: list[capstone.CsInsn],
+    index: int,
+    argument: int,
+    ranges: list[tuple[int, int]],
+    bits: int = 64,
+    pic: dict[int, int] | None = None,
+) -> Provenance:
+    pic = pic or {}
+    if bits == 32:
+        return stack_argument_provenance(instructions, index, argument, ranges, pic)
+    return trace_register(instructions, index, ARG_REGISTERS[argument], ranges, pic)
 
 
 # Index just before `index` where this call's argument setup can begin. The
@@ -298,8 +465,10 @@ def argument_provenance(
 # preceding call belong to this call. Bounding the search there (and by the
 # provenance window) stops a value left in a register by an earlier call's
 # setup from being mistaken for an argument to this one.
-def setup_region_start(instructions: list[capstone.CsInsn], index: int) -> int:
-    low = max(0, index - PROVENANCE_WINDOW)
+def setup_region_start(
+    instructions: list[capstone.CsInsn], index: int, window: int = PROVENANCE_WINDOW
+) -> int:
+    low = max(0, index - window)
     for position in range(index - 1, low - 1, -1):
         if instructions[position].mnemonic.endswith("call"):
             return position + 1
@@ -318,14 +487,19 @@ def register_written_between(
 
 
 # True when the format is the call's only argument: printf(user) rather than
-# printf("%s", user). The first variadic argument always lands in the register
-# right after the format, so if that register is never set up for this call
-# there are no variadic arguments. A non-constant format passed alone is the
-# textbook format-string signature.
+# printf("%s", user). The first variadic argument always lands in the slot right
+# after the format -- the next register on x86-64, the next stack slot on x86-32
+# -- so if that slot is never set up for this call there are no variadic
+# arguments. A non-constant format passed alone is the textbook format-string
+# signature. On x86-32 an esp model it could not follow yields False, so the
+# stronger claim is only made when the setup was understood.
 def format_is_sole_argument(
-    instructions: list[capstone.CsInsn], index: int, format_argument: int
+    instructions: list[capstone.CsInsn], index: int, format_argument: int, bits: int = 64
 ) -> bool:
     first_variadic = format_argument + 1
+    if bits == 32:
+        args, reliable = outgoing_stack_args(instructions, index)
+        return reliable and first_variadic not in args
     if first_variadic >= len(ARG_REGISTERS):
         return True
     start = setup_region_start(instructions, index)
@@ -340,8 +514,10 @@ def explore(path: Path) -> list[RiskyCall]:
     disassembler = disassembler_for(binary)
     names = plt_targets(binary, disassembler)
     ranges = readonly_ranges(binary)
-    # The provenance analysis assumes the System V AMD64 register convention.
-    refine = binary.header.machine_type == Arch.X86_64
+    # Provenance refinement handles both conventions: x86-64 argument registers
+    # and the x86-32 cdecl stack.
+    bits = {Arch.X86_64: 64, Arch.I386: 32}.get(binary.header.machine_type)
+    refine = bits is not None
 
     text = binary.get_section(".text")
     instructions = (
@@ -349,6 +525,8 @@ def explore(path: Path) -> list[RiskyCall]:
         if text is not None
         else []
     )
+    # On x86-32, resolve the PIC base so lea-loaded constant strings are known.
+    pic = pic_bases(instructions) if bits == 32 else {}
 
     sites: dict[str, list[CallSite]] = {}
     for index, instruction in enumerate(instructions):
@@ -364,16 +542,18 @@ def explore(path: Path) -> list[RiskyCall]:
         note: str | None = None
         if refine and function in FORMAT_ARGUMENT:
             format_argument = FORMAT_ARGUMENT[function]
-            fmt = argument_provenance(instructions, index, format_argument, ranges)
+            fmt = argument_provenance(instructions, index, format_argument, ranges, bits, pic)
             # A constant format cannot carry an attacker's specifiers: not a bug.
             if fmt.kind == "readonly":
                 continue
             # A non-constant format passed as the only argument is the textbook
             # format-string bug; flag that stronger signal.
-            if format_is_sole_argument(instructions, index, format_argument):
+            if format_is_sole_argument(instructions, index, format_argument, bits):
                 note = "single-arg"
         elif refine and function in LENGTH_ARGUMENT:
-            length = argument_provenance(instructions, index, LENGTH_ARGUMENT[function], ranges)
+            length = argument_provenance(
+                instructions, index, LENGTH_ARGUMENT[function], ranges, bits, pic
+            )
             note = f"n={length.value:#x}" if length.kind == "immediate" else "n=computed"
 
         sites.setdefault(function, []).append(CallSite(instruction.address, note))

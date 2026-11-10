@@ -19,7 +19,9 @@ from compwnion.explore import (
     disassembler_for,
     explore,
     format_is_sole_argument,
+    outgoing_stack_args,
     plt_targets,
+    stack_argument_provenance,
 )
 from compwnion.impacts import Severity
 from compwnion.scan import UnsupportedBinaryError
@@ -166,18 +168,72 @@ def test_disassembler_matches_architecture() -> None:
     assert disassembler_for(binary32).mode & capstone.CS_MODE_32
 
 
-@pytest.mark.skipif(
+_needs_multilib = pytest.mark.skipif(
     not (ELF_FIXTURES / "vuln-no-pie-32").exists(),
-    reason="vuln-no-pie-32 fixture needs gcc-multilib; built by the Makefile on Linux/WSL",
+    reason="x86-32 fixtures need gcc-multilib; built by the Makefile on Linux/WSL",
 )
+
+
+@_needs_multilib
 def test_explore_resolves_absolute_plt_on_x86_32() -> None:
     # A 32-bit non-PIE binary reaches the GOT through an absolute memory operand
     # (jmp [0x804xxxx]), not the x86-64 RIP-relative form. explore must still
-    # resolve the PLT and flag the risky calls, printf among them.
+    # resolve the PLT and flag every risky call, as it does on x86-64.
     found = findings_by_name("vuln-no-pie-32")
 
-    assert "printf" in found
-    assert "scanf" in found
+    assert {name: found[name].severity for name in found} == EXPECTED
+
+
+@_needs_multilib
+def test_explore_refines_single_arg_format_on_x86_32() -> None:
+    # The cdecl stack model must see that vuln.c's printf(input) is passed its
+    # format as the only (stack) argument, just as the register model does on
+    # x86-64.
+    printf = findings_by_name("vuln-no-pie-32")["printf"]
+
+    assert [site.note for site in printf.call_sites] == ["single-arg"]
+
+
+@_needs_multilib
+def test_explore_annotates_read_length_on_x86_32() -> None:
+    # read(0, local, 256): the length is the third stack argument, a constant.
+    read = findings_by_name("vuln-no-pie-32")["read"]
+
+    assert [site.note for site in read.call_sites] == ["n=0x100"]
+
+
+@pytest.mark.skipif(
+    not (ELF_FIXTURES / "vuln-fmt-const-pie-32").exists(),
+    reason="x86-32 fixtures need gcc-multilib; built by the Makefile on Linux/WSL",
+)
+def test_explore_masks_pic_relative_constant_format_on_x86_32() -> None:
+    # In a 32-bit PIE, the constant format is loaded relative to the PIC base
+    # (lea [ebx - disp]). explore must resolve that base and mask the call, so
+    # nothing is reported, exactly as for the x86-64 constant-format binary.
+    assert explore(ELF_FIXTURES / "vuln-fmt-const-pie-32") == []
+
+
+def test_cdecl_stack_model_handles_accumulated_mov_style() -> None:
+    # Many x86-32 compilers set up arguments with sub esp; mov [esp+k], arg
+    # rather than push. Neither committed x86-32 fixture uses this style, so
+    # exercise it directly on a hand-assembled two-argument call:
+    #   sub esp,0x10 ; mov [esp],0x8048000 ; mov [esp+4],eax ; call rel32
+    code = bytes.fromhex("83EC10" "C7042400800408" "89442404" "E800000000")
+    disassembler = disassembler_for(
+        lief.parse(str(ELF_FIXTURES / "static-nostdlib-32"))
+    )
+    instructions = list(disassembler.disasm(code, 0x1000))
+    call_index = len(instructions) - 1
+
+    args, reliable = outgoing_stack_args(instructions, call_index)
+    assert reliable
+    assert set(args) == {0, 1}
+
+    first = stack_argument_provenance(instructions, call_index, 0, [], {})
+    assert first.kind == "immediate"
+    assert first.value == 0x8048000
+    # Two arguments, so the format is not the sole argument.
+    assert format_is_sole_argument(instructions, call_index, 0, bits=32) is False
 
 
 def test_explore_on_binary_without_plt_returns_nothing() -> None:

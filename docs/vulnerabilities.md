@@ -28,9 +28,12 @@ libc functions (the *sinks* below). So:
   claiming certainty.
 - Two refinements raise confidence on x86-64:
   - **Local provenance** (`explore.py`): traces where a call's key argument
-    comes from within the function, through register copies. It masks a
-    `printf` whose format is a link-time constant, and reports whether a single
-    argument (a format, a `read` length) is the call's *only* argument.
+    comes from within the function. It follows the x86-64 argument registers
+    and the x86-32 cdecl stack (both the `push arg` and the `sub esp; mov
+    [esp+k], arg` styles), resolving the x86-32 PIC base so constant strings
+    loaded as `lea [ebx - disp]` are recognized. It masks a `printf` whose
+    format is a link-time constant, reports whether the format is the call's
+    *only* argument, and annotates a `read`/`memcpy` length.
   - **Deep taint** (`explore.py --deep`, `deep.py`): emulates from `main` with
     Triton along one concrete path, taints input buffers, and marks a call
     `CONFIRMED` when attacker data provably reaches its key argument.
@@ -133,10 +136,12 @@ these; a clean report does not rule them out.
 ## Practical limits of the current engine
 
 - **PLT-resolved calls only:** statically linked or non-x86 binaries resolve few
-  or no names, so little is reported. Refinement (provenance, taint) is x86-64
-  only.
+  or no names, so little is reported. Local provenance covers x86 and x86-64;
+  deep taint (`--deep`) is x86-64 only.
 - **Local provenance** does not follow values through memory, across functions,
-  or around loops — hence deep taint for the cross-function answer.
+  or around loops — hence deep taint for the cross-function answer. On an
+  x86-32 PIE whose PIC base it cannot resolve, a constant format is reported
+  rather than masked (a false positive, not a missed bug).
 - **Deep taint** follows a *single concrete path* within an instruction budget;
   a call it never reaches simply stays unconfirmed. It raises confidence; it
   never clears a finding.

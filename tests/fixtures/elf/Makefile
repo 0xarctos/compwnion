@@ -17,7 +17,8 @@ BINARIES = hello-pie hello-no-pie hello-hardened hello-unhardened hello-partial-
 	hello-shstk-only hello-lib hello-puts-only hello-bad-symbol \
 	static-nostdlib static-nostdlib-32 static-pie-nostdlib static-no-gnustack \
 	static-no-gnustack-32 static-rwx-load \
-	vuln-pie vuln-no-pie vuln-fmt-const fmt-taint fmt-vararg vuln-no-pie-32
+	vuln-pie vuln-no-pie vuln-fmt-const fmt-taint fmt-vararg \
+	vuln-no-pie-32 vuln-fmt-const-pie-32
 
 # Risky calls stay as plain PLT calls: no FORTIFY (no _chk variants), no stack
 # protector noise, and -O0 so the compiler elides none of them.
@@ -121,9 +122,15 @@ fmt-vararg: fmt_vararg.c
 
 # 32-bit, non-PIE: its PLT stubs reach the GOT through an absolute memory
 # operand (jmp [0x804xxxx]) rather than the x86-64 RIP-relative form, which
-# explore must still resolve. Needs gcc-multilib for -m32.
+# explore must still resolve. Exercises the cdecl stack argument model (single
+# argument, read length). Needs gcc-multilib for -m32.
 vuln-no-pie-32: vuln.c
 	$(CC) -O0 -s -m32 $(VULN) -fno-pie -no-pie -o $@ $<
+
+# 32-bit, PIE: constant format strings are loaded relative to the PIC base
+# (lea [ebx - disp]); explore must resolve that base to mask them.
+vuln-fmt-const-pie-32: fmt.c
+	$(CC) -O0 -s -m32 $(VULN) -fPIE -pie -o $@ $<
 
 clean:
 	rm -f $(BINARIES)

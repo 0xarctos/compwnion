@@ -93,8 +93,10 @@ that are a bug only under a condition (a user-controlled format or length). It
 covers x86 and x86-64, and resolves names through the PLT, so statically linked
 or non-x86 binaries report little or nothing.
 
-On x86-64, each flagged call is refined by tracing where its key argument comes
-from, within the function and following register copies:
+On x86 and x86-64, each flagged call is refined by tracing where its key
+argument comes from within the function. This follows the x86-64 argument
+registers and the x86-32 cdecl stack alike, resolving the x86-32 PIC base so
+constant strings loaded relative to it are recognized:
 
 - A `printf`-family call whose format string is a constant is **not** reported:
   a constant format cannot carry attacker-controlled specifiers.
@@ -149,3 +151,6 @@ to run the tests. To rebuild them on Linux or WSL, with gcc and make installed:
 ```sh
 make -B -C tests/fixtures/elf
 ```
+
+The 32-bit fixtures (`*-32`) need `gcc-multilib` for `-m32`. Tests that use a
+fixture which is not present are skipped, so the suite still passes without it.
